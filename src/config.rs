@@ -18,6 +18,10 @@ pub const GAMMA_API_BASE: &str = "https://gamma-api.polymarket.com";
 /// Arb threshold: alert when total cost < this (e.g., 0.995 = 0.5% profit)
 pub const ARB_THRESHOLD: f64 = 0.995;
 
+/// POLY_ONLY_MODE: When true, only monitors Polymarket for same-platform arbitrage
+/// (YES + NO on Polymarket only, no Kalshi integration)
+pub const POLY_ONLY_MODE: bool = true;
+
 /// Polymarket ping interval (seconds) - keep connection alive
 pub const POLY_PING_INTERVAL_SECS: u64 = 30;
 

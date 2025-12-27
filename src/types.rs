@@ -175,10 +175,24 @@ impl AtomicMarketState {
     #[inline(always)]
     pub fn check_arbs(&self, threshold_cents: PriceCents) -> u8 {
         use wide::{i16x8, CmpLt};
+        use crate::config::POLY_ONLY_MODE;
 
         let (k_yes, k_no, _, _) = self.kalshi.load();
         let (p_yes, p_no, _, _) = self.poly.load();
 
+        // In POLY_ONLY mode, only check Poly-Poly arbitrage
+        if POLY_ONLY_MODE {
+            if p_yes == NO_PRICE || p_no == NO_PRICE {
+                return 0;
+            }
+            let poly_cost = (p_yes + p_no) as i16;
+            if poly_cost < threshold_cents as i16 {
+                return 4; // bit 2 = PolyOnly
+            }
+            return 0;
+        }
+
+        // Cross-platform mode: check all arb types
         if k_yes == NO_PRICE || k_no == NO_PRICE || p_yes == NO_PRICE || p_no == NO_PRICE {
             return 0;
         }

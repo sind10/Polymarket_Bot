@@ -48,7 +48,7 @@ impl Default for NanoClock {
 
 /// Core execution engine for processing arbitrage opportunities
 pub struct ExecutionEngine {
-    kalshi: Arc<KalshiApiClient>,
+    kalshi: Option<Arc<KalshiApiClient>>,
     poly_async: Arc<SharedAsyncClient>,
     state: Arc<GlobalState>,
     circuit_breaker: Arc<CircuitBreaker>,
@@ -61,7 +61,7 @@ pub struct ExecutionEngine {
 
 impl ExecutionEngine {
     pub fn new(
-        kalshi: Arc<KalshiApiClient>,
+        kalshi: Option<Arc<KalshiApiClient>>,
         poly_async: Arc<SharedAsyncClient>,
         state: Arc<GlobalState>,
         circuit_breaker: Arc<CircuitBreaker>,
@@ -295,7 +295,9 @@ impl ExecutionEngine {
         match req.arb_type {
             // === CROSS-PLATFORM: Poly YES + Kalshi NO ===
             ArbType::PolyYesKalshiNo => {
-                let kalshi_fut = self.kalshi.buy_ioc(
+                let kalshi = self.kalshi.as_ref()
+                    .ok_or_else(|| anyhow!("Kalshi not configured - cannot execute cross-platform arb"))?;
+                let kalshi_fut = kalshi.buy_ioc(
                     &pair.kalshi_market_ticker,
                     "no",
                     req.no_price as i64,
@@ -312,7 +314,9 @@ impl ExecutionEngine {
 
             // === CROSS-PLATFORM: Kalshi YES + Poly NO ===
             ArbType::KalshiYesPolyNo => {
-                let kalshi_fut = self.kalshi.buy_ioc(
+                let kalshi = self.kalshi.as_ref()
+                    .ok_or_else(|| anyhow!("Kalshi not configured - cannot execute cross-platform arb"))?;
+                let kalshi_fut = kalshi.buy_ioc(
                     &pair.kalshi_market_ticker,
                     "yes",
                     req.yes_price as i64,
@@ -345,13 +349,15 @@ impl ExecutionEngine {
 
             // === SAME-PLATFORM: Kalshi YES + Kalshi NO ===
             ArbType::KalshiOnly => {
-                let yes_fut = self.kalshi.buy_ioc(
+                let kalshi = self.kalshi.as_ref()
+                    .ok_or_else(|| anyhow!("Kalshi not configured - cannot execute Kalshi-only arb"))?;
+                let yes_fut = kalshi.buy_ioc(
                     &pair.kalshi_market_ticker,
                     "yes",
                     req.yes_price as i64,
                     contracts,
                 );
-                let no_fut = self.kalshi.buy_ioc(
+                let no_fut = kalshi.buy_ioc(
                     &pair.kalshi_market_ticker,
                     "no",
                     req.no_price as i64,
@@ -461,7 +467,7 @@ impl ExecutionEngine {
 
     /// Background task to automatically close excess exposure from mismatched fills
     async fn auto_close_background(
-        kalshi: Arc<KalshiApiClient>,
+        kalshi: Option<Arc<KalshiApiClient>>,
         poly_async: Arc<SharedAsyncClient>,
         arb_type: ArbType,
         yes_filled: i64,
@@ -508,19 +514,23 @@ impl ExecutionEngine {
             }
 
             ArbType::KalshiOnly => {
-                let (side, price) = if yes_filled > no_filled {
-                    ("yes", yes_price as i64)
-                } else {
-                    ("no", no_price as i64)
-                };
-                let close_price = price.saturating_sub(10).max(1);
+                if let Some(kalshi) = &kalshi {
+                    let (side, price) = if yes_filled > no_filled {
+                        ("yes", yes_price as i64)
+                    } else {
+                        ("no", no_price as i64)
+                    };
+                    let close_price = price.saturating_sub(10).max(1);
 
-                match kalshi.sell_ioc(&kalshi_ticker, side, close_price, excess).await {
-                    Ok(resp) => {
-                        let proceeds = resp.order.taker_fill_cost.unwrap_or(0) + resp.order.maker_fill_cost.unwrap_or(0);
-                        log_close_pnl("Kalshi", resp.order.filled_count(), proceeds);
+                    match kalshi.sell_ioc(&kalshi_ticker, side, close_price, excess).await {
+                        Ok(resp) => {
+                            let proceeds = resp.order.taker_fill_cost.unwrap_or(0) + resp.order.maker_fill_cost.unwrap_or(0);
+                            log_close_pnl("Kalshi", resp.order.filled_count(), proceeds);
+                        }
+                        Err(e) => warn!("[EXEC] ⚠️ Failed to close Kalshi excess: {}", e),
                     }
-                    Err(e) => warn!("[EXEC] ⚠️ Failed to close Kalshi excess: {}", e),
+                } else {
+                    warn!("[EXEC] ⚠️ Cannot close Kalshi excess - Kalshi not configured");
                 }
             }
 
@@ -535,7 +545,7 @@ impl ExecutionEngine {
                         Ok(fill) => log_close_pnl("Poly", fill.filled_size as i64, (fill.fill_cost * 100.0) as i64),
                         Err(e) => warn!("[EXEC] ⚠️ Failed to close Poly excess: {}", e),
                     }
-                } else {
+                } else if let Some(kalshi) = &kalshi {
                     // Kalshi NO excess
                     let close_price = (no_price as i64).saturating_sub(10).max(1);
                     match kalshi.sell_ioc(&kalshi_ticker, "no", close_price, excess).await {
@@ -545,19 +555,25 @@ impl ExecutionEngine {
                         }
                         Err(e) => warn!("[EXEC] ⚠️ Failed to close Kalshi excess: {}", e),
                     }
+                } else {
+                    warn!("[EXEC] ⚠️ Cannot close Kalshi NO excess - Kalshi not configured");
                 }
             }
 
             ArbType::KalshiYesPolyNo => {
                 if yes_filled > no_filled {
                     // Kalshi YES excess
-                    let close_price = (yes_price as i64).saturating_sub(10).max(1);
-                    match kalshi.sell_ioc(&kalshi_ticker, "yes", close_price, excess).await {
-                        Ok(resp) => {
-                            let proceeds = resp.order.taker_fill_cost.unwrap_or(0) + resp.order.maker_fill_cost.unwrap_or(0);
-                            log_close_pnl("Kalshi", resp.order.filled_count(), proceeds);
+                    if let Some(kalshi) = &kalshi {
+                        let close_price = (yes_price as i64).saturating_sub(10).max(1);
+                        match kalshi.sell_ioc(&kalshi_ticker, "yes", close_price, excess).await {
+                            Ok(resp) => {
+                                let proceeds = resp.order.taker_fill_cost.unwrap_or(0) + resp.order.maker_fill_cost.unwrap_or(0);
+                                log_close_pnl("Kalshi", resp.order.filled_count(), proceeds);
+                            }
+                            Err(e) => warn!("[EXEC] ⚠️ Failed to close Kalshi excess: {}", e),
                         }
-                        Err(e) => warn!("[EXEC] ⚠️ Failed to close Kalshi excess: {}", e),
+                    } else {
+                        warn!("[EXEC] ⚠️ Cannot close Kalshi YES excess - Kalshi not configured");
                     }
                 } else {
                     // Poly NO excess

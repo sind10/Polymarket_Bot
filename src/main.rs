@@ -31,6 +31,7 @@ mod kalshi;
 mod polymarket;
 mod polymarket_clob;
 mod position_tracker;
+mod telegram;
 mod types;
 
 use anyhow::{Context, Result};
@@ -40,12 +41,13 @@ use tracing::{error, info, warn};
 
 use cache::TeamCache;
 use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
-use config::{ARB_THRESHOLD, ENABLED_LEAGUES, WS_RECONNECT_DELAY_SECS};
+use config::{ARB_THRESHOLD, ENABLED_LEAGUES, WS_RECONNECT_DELAY_SECS, POLY_ONLY_MODE};
 use discovery::DiscoveryClient;
 use execution::{ExecutionEngine, create_execution_channel, run_execution_loop};
 use kalshi::{KalshiConfig, KalshiApiClient};
 use polymarket_clob::{PolymarketAsyncClient, PreparedCreds, SharedAsyncClient};
 use position_tracker::{PositionTracker, create_position_channel, position_writer_loop};
+use telegram::{TelegramConfig, TelegramBot, TelegramNotifier, TelegramNotification, PerformanceTracker, create_telegram_channel};
 use types::{GlobalState, PriceCents};
 
 /// Polymarket CLOB API host
@@ -76,9 +78,33 @@ async fn main() -> Result<()> {
         warn!("   Mode: LIVE EXECUTION");
     }
 
-    // Load Kalshi credentials
-    let kalshi_config = KalshiConfig::from_env()?;
-    info!("[KALSHI] API key loaded");
+    // Check POLY_ONLY mode
+    if POLY_ONLY_MODE {
+        info!("   Platform: POLYMARKET ONLY (same-platform arbitrage)");
+    } else {
+        info!("   Platform: KALSHI + POLYMARKET (cross-platform arbitrage)");
+    }
+
+    // Initialize Telegram notifications
+    let telegram_notifier = if let Some(tg_config) = TelegramConfig::from_env() {
+        info!("📱 Telegram notifications enabled");
+        let bot = TelegramBot::new(tg_config);
+        let channel = create_telegram_channel(bot);
+        TelegramNotifier::new(Some(channel))
+    } else {
+        info!("📱 Telegram notifications disabled (set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to enable)");
+        TelegramNotifier::none()
+    };
+
+    // Load Kalshi credentials (only if not in POLY_ONLY mode)
+    let kalshi_config = if !POLY_ONLY_MODE {
+        let config = KalshiConfig::from_env()?;
+        info!("[KALSHI] API key loaded");
+        Some(config)
+    } else {
+        info!("[KALSHI] Skipped (POLY_ONLY_MODE enabled)");
+        None
+    };
 
     // Load Polymarket credentials
     dotenvy::dotenv().ok();
@@ -111,8 +137,12 @@ async fn main() -> Result<()> {
     let team_cache = TeamCache::load();
     info!("📂 Loaded {} team code mappings", team_cache.len());
 
-    // Create Kalshi API client
-    let kalshi_api = Arc::new(KalshiApiClient::new(kalshi_config));
+    // Create Kalshi API client (only if not in POLY_ONLY mode)
+    let kalshi_api = if let Some(ref config) = kalshi_config {
+        Some(Arc::new(KalshiApiClient::new(config.clone())))
+    } else {
+        None
+    };
 
     // Run discovery (with caching support)
     let force_discovery = std::env::var("FORCE_DISCOVERY")
@@ -157,6 +187,7 @@ async fn main() -> Result<()> {
     }
 
     // Build global state
+    let markets_count = result.pairs.len();
     let state = Arc::new({
         let mut s = GlobalState::new();
         for pair in result.pairs {
@@ -164,6 +195,14 @@ async fn main() -> Result<()> {
         }
         info!("📡 Global state initialized: tracking {} markets", s.market_count());
         s
+    });
+
+    // Send Telegram notification: Bot started
+    let mode_str = if dry_run { "DRY RUN" } else { "LIVE" };
+    let platform_str = if POLY_ONLY_MODE { "Polymarket Only" } else { "Cross-Platform" };
+    telegram_notifier.notify(TelegramNotification::BotStarted {
+        mode: format!("{} - {}", mode_str, platform_str),
+        markets_count,
     });
 
     // Initialize execution infrastructure
@@ -177,6 +216,7 @@ async fn main() -> Result<()> {
 
     let threshold_cents: PriceCents = ((ARB_THRESHOLD * 100.0).round() as u16).max(1);
     info!("   Execution threshold: {} cents", threshold_cents);
+
 
     let engine = Arc::new(ExecutionEngine::new(
         kalshi_api.clone(),
@@ -259,19 +299,24 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Initialize Kalshi WebSocket connection (config reused on reconnects)
-    let kalshi_state = state.clone();
-    let kalshi_exec_tx = exec_tx.clone();
-    let kalshi_threshold = threshold_cents;
-    let kalshi_ws_config = KalshiConfig::from_env()?;
-    let kalshi_handle = tokio::spawn(async move {
-        loop {
-            if let Err(e) = kalshi::run_ws(&kalshi_ws_config, kalshi_state.clone(), kalshi_exec_tx.clone(), kalshi_threshold).await {
-                error!("[KALSHI] WebSocket disconnected: {} - reconnecting...", e);
+    // Initialize Kalshi WebSocket connection (only if not in POLY_ONLY mode)
+    let kalshi_handle = if !POLY_ONLY_MODE {
+        let kalshi_state = state.clone();
+        let kalshi_exec_tx = exec_tx.clone();
+        let kalshi_threshold = threshold_cents;
+        let kalshi_ws_config = KalshiConfig::from_env()?;
+        Some(tokio::spawn(async move {
+            loop {
+                if let Err(e) = kalshi::run_ws(&kalshi_ws_config, kalshi_state.clone(), kalshi_exec_tx.clone(), kalshi_threshold).await {
+                    error!("[KALSHI] WebSocket disconnected: {} - reconnecting...", e);
+                }
+                tokio::time::sleep(tokio::time::Duration::from_secs(WS_RECONNECT_DELAY_SECS)).await;
             }
-            tokio::time::sleep(tokio::time::Duration::from_secs(WS_RECONNECT_DELAY_SECS)).await;
-        }
-    });
+        }))
+    } else {
+        info!("[KALSHI] WebSocket skipped (POLY_ONLY_MODE enabled)");
+        None
+    };
 
     // Initialize Polymarket WebSocket connection
     let poly_state = state.clone();
@@ -289,26 +334,46 @@ async fn main() -> Result<()> {
     // System health monitoring and arbitrage diagnostics
     let heartbeat_state = state.clone();
     let heartbeat_threshold = threshold_cents;
+    let poly_only_mode = POLY_ONLY_MODE;
+    let heartbeat_telegram = telegram_notifier.clone();
     let heartbeat_handle = tokio::spawn(async move {
         use crate::types::kalshi_fee_cents;
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        // Telegram status report every 30 minutes
+        let mut telegram_interval = tokio::time::interval(tokio::time::Duration::from_secs(1800));
+        let mut perf_tracker = PerformanceTracker::new();
+        
         loop {
-            interval.tick().await;
-            let market_count = heartbeat_state.market_count();
-            let mut with_kalshi = 0;
-            let mut with_poly = 0;
-            let mut with_both = 0;
-            // Track best arbitrage opportunity: (total_cost, market_id, p_yes, k_no, k_yes, p_no, fee, is_poly_yes_kalshi_no)
-            let mut best_arb: Option<(u16, u16, u16, u16, u16, u16, u16, bool)> = None;
+            tokio::select! {
+                _ = interval.tick() => {
+                    let market_count = heartbeat_state.market_count();
+                    let mut with_kalshi = 0;
+                    let mut with_poly = 0;
+                    let mut with_both = 0;
+                    // Track best arbitrage opportunity
+                    // For POLY_ONLY: (total_cost, market_id, p_yes, p_no)
+                    // For cross-platform: (total_cost, market_id, p_yes, k_no, k_yes, p_no, fee, is_poly_yes_kalshi_no)
+                    let mut best_arb: Option<(u16, u16, u16, u16, u16, u16, u16, bool)> = None;
+                    let mut best_poly_only_arb: Option<(u16, u16, u16, u16)> = None;
 
-            for market in heartbeat_state.markets.iter().take(market_count) {
-                let (k_yes, k_no, _, _) = market.kalshi.load();
-                let (p_yes, p_no, _, _) = market.poly.load();
-                let has_k = k_yes > 0 && k_no > 0;
-                let has_p = p_yes > 0 && p_no > 0;
-                if k_yes > 0 || k_no > 0 { with_kalshi += 1; }
-                if p_yes > 0 || p_no > 0 { with_poly += 1; }
-                if has_k && has_p {
+                    for market in heartbeat_state.markets.iter().take(market_count) {
+                        let (k_yes, k_no, _, _) = market.kalshi.load();
+                        let (p_yes, p_no, _, _) = market.poly.load();
+                        let has_k = k_yes > 0 && k_no > 0;
+                        let has_p = p_yes > 0 && p_no > 0;
+                        if k_yes > 0 || k_no > 0 { with_kalshi += 1; }
+                        if p_yes > 0 || p_no > 0 { with_poly += 1; }
+
+                // POLY_ONLY mode: check Poly-Poly arbitrage
+                if poly_only_mode && has_p {
+                    let poly_cost = p_yes + p_no;
+                    if best_poly_only_arb.is_none() || poly_cost < best_poly_only_arb.as_ref().unwrap().0 {
+                        best_poly_only_arb = Some((poly_cost, market.market_id, p_yes, p_no));
+                    }
+                }
+
+                // Cross-platform mode
+                if !poly_only_mode && has_k && has_p {
                     with_both += 1;
 
                     let fee1 = kalshi_fee_cents(k_no);
@@ -329,36 +394,76 @@ async fn main() -> Result<()> {
                 }
             }
 
-            info!("💓 System heartbeat | Markets: {} total, {} with Kalshi prices, {} with Polymarket prices, {} with both | threshold={}¢",
-                  market_count, with_kalshi, with_poly, with_both, heartbeat_threshold);
+            if poly_only_mode {
+                info!("💓 System heartbeat | Markets: {} total, {} with Polymarket prices | threshold={}¢ | MODE: POLY_ONLY",
+                      market_count, with_poly, heartbeat_threshold);
 
-            if let Some((cost, market_id, p_yes, k_no, k_yes, p_no, fee, is_poly_yes)) = best_arb {
-                let gap = cost as i16 - heartbeat_threshold as i16;
-                let desc = heartbeat_state.get_by_id(market_id)
-                    .and_then(|m| m.pair.as_ref())
-                    .map(|p| &*p.description)
-                    .unwrap_or("Unknown");
-                let leg_breakdown = if is_poly_yes {
-                    format!("P_yes({}¢) + K_no({}¢) + K_fee({}¢) = {}¢", p_yes, k_no, fee, cost)
-                } else {
-                    format!("K_yes({}¢) + P_no({}¢) + K_fee({}¢) = {}¢", k_yes, p_no, fee, cost)
-                };
-                if gap <= 10 {
-                    info!("   📊 Best opportunity: {} | {} | gap={:+}¢ | [Poly_yes={}¢ Kalshi_no={}¢ Kalshi_yes={}¢ Poly_no={}¢]",
-                          desc, leg_breakdown, gap, p_yes, k_no, k_yes, p_no);
-                } else {
-                    info!("   📊 Best opportunity: {} | {} | gap={:+}¢ (market efficient)",
-                          desc, leg_breakdown, gap);
+                if let Some((cost, market_id, p_yes, p_no)) = best_poly_only_arb {
+                    let gap = cost as i16 - heartbeat_threshold as i16;
+                    let desc = heartbeat_state.get_by_id(market_id)
+                        .and_then(|m| m.pair.as_ref())
+                        .map(|p| &*p.description)
+                        .unwrap_or("Unknown");
+                    let leg_breakdown = format!("P_yes({}¢) + P_no({}¢) = {}¢ (NO FEES)", p_yes, p_no, cost);
+                    if gap <= 10 {
+                        info!("   📊 Best Poly-Only opportunity: {} | {} | gap={:+}¢",
+                              desc, leg_breakdown, gap);
+                    } else {
+                        info!("   📊 Best Poly-Only opportunity: {} | {} | gap={:+}¢ (market efficient)",
+                              desc, leg_breakdown, gap);
+                    }
+                } else if with_poly == 0 {
+                    warn!("   ⚠️  No markets with Polymarket prices - verify WebSocket connection");
                 }
-            } else if with_both == 0 {
-                warn!("   ⚠️  No markets with both Kalshi and Polymarket prices - verify WebSocket connections");
+            } else {
+                info!("💓 System heartbeat | Markets: {} total, {} with Kalshi prices, {} with Polymarket prices, {} with both | threshold={}¢",
+                      market_count, with_kalshi, with_poly, with_both, heartbeat_threshold);
+
+                if let Some((cost, market_id, p_yes, k_no, k_yes, p_no, fee, is_poly_yes)) = best_arb {
+                    let gap = cost as i16 - heartbeat_threshold as i16;
+                    let desc = heartbeat_state.get_by_id(market_id)
+                        .and_then(|m| m.pair.as_ref())
+                        .map(|p| &*p.description)
+                        .unwrap_or("Unknown");
+                    let leg_breakdown = if is_poly_yes {
+                        format!("P_yes({}¢) + K_no({}¢) + K_fee({}¢) = {}¢", p_yes, k_no, fee, cost)
+                    } else {
+                        format!("K_yes({}¢) + P_no({}¢) + K_fee({}¢) = {}¢", k_yes, p_no, fee, cost)
+                    };
+                    if gap <= 10 {
+                        info!("   📊 Best opportunity: {} | {} | gap={:+}¢ | [Poly_yes={}¢ Kalshi_no={}¢ Kalshi_yes={}¢ Poly_no={}¢]",
+                              desc, leg_breakdown, gap, p_yes, k_no, k_yes, p_no);
+                    } else {
+                        info!("   📊 Best opportunity: {} | {} | gap={:+}¢ (market efficient)",
+                              desc, leg_breakdown, gap);
+                    }
+                } else if with_both == 0 {
+                    warn!("   ⚠️  No markets with both Kalshi and Polymarket prices - verify WebSocket connections");
+                }
+            }
+                }
+                
+                // Telegram periodic status report (every 30 minutes)
+                _ = telegram_interval.tick() => {
+                    heartbeat_telegram.notify(TelegramNotification::StatusUpdate {
+                        uptime_hours: perf_tracker.uptime_hours(),
+                        total_trades: perf_tracker.total_trades,
+                        successful_trades: perf_tracker.successful_trades,
+                        total_profit_cents: perf_tracker.total_profit_cents,
+                        markets_monitored: heartbeat_state.market_count(),
+                    });
+                }
             }
         }
     });
 
     // Main event loop - run until termination
     info!("✅ All systems operational - entering main event loop");
-    let _ = tokio::join!(kalshi_handle, poly_handle, heartbeat_handle, exec_handle);
+    if let Some(kalshi_h) = kalshi_handle {
+        let _ = tokio::join!(kalshi_h, poly_handle, heartbeat_handle, exec_handle);
+    } else {
+        let _ = tokio::join!(poly_handle, heartbeat_handle, exec_handle);
+    }
 
     Ok(())
 }
