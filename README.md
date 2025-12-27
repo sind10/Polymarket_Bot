@@ -1,340 +1,293 @@
-# Kalshi-Poly / Poly-Poly / Kalshi-Kalshi Arbitrage Bot
+# 🤖 Polymarket-Kalshi Arbitrage Bot
 
-**Kalshi-Poly arbitrage bot**, **Poly-Poly arbitrage bot**, and **Kalshi-Kalshi arbitrage bot** for automated cross-platform trading. A high-performance, production-ready arbitrage trading system that monitors price discrepancies between Kalshi and Polymarket, executing risk-free arbitrage opportunities in real-time with sub-millisecond latency.
+<p align="center">
+  <img src="https://img.shields.io/badge/Rust-1.75+-orange?logo=rust" alt="Rust">
+  <img src="https://img.shields.io/badge/License-MIT%2FApache--2.0-blue" alt="License">
+  <img src="https://img.shields.io/badge/Status-Production%20Ready-green" alt="Status">
+</p>
 
-> 🔍 **Search Keywords**: polymarket arbitrage bot, polymarket-kalshi arbitrage bot, kalshi-poly arbitrage, poly-poly arbitrage, kalshi-kalshi arbitrage, kalshi arbitrage, prediction market arbitrage, cross-platform trading bot
+> **Bot d'arbitrage haute performance** pour les marchés de prédiction Kalshi et Polymarket.  
+> Détection et exécution automatique d'opportunités d'arbitrage sans risque en temps réel.
 
-## Overview
+---
 
-This **Kalshi-Poly / Poly-Poly / Kalshi-Kalshi arbitrage bot** identifies and executes arbitrage opportunities across:
+## 📋 Table des matières
 
-- **Kalshi-Poly markets** (cross-platform arbitrage between Kalshi and Polymarket)
-- **Poly-Poly markets** (same-platform arbitrage on Polymarket)
-- **Kalshi-Kalshi markets** (same-platform arbitrage on Kalshi)
+- [✨ Fonctionnalités](#-fonctionnalités)
+- [🎯 Comment ça marche](#-comment-ça-marche)
+- [🚀 Démarrage rapide](#-démarrage-rapide)
+- [⚙️ Configuration](#️-configuration)
+- [📖 Utilisation](#-utilisation)
+- [🏗️ Architecture](#️-architecture)
+- [📊 Statut du projet](#-statut-du-projet)
+- [🤝 Contribution](#-contribution)
+- [📄 Licence](#-licence)
 
-The bot takes both sides of a market when YES and NO prices add up to less than $1.00, guaranteeing a risk-free profit at market expiry.
+---
 
-### How It Works
+## ✨ Fonctionnalités
 
-**Example Opportunity:**
-- YES = $0.40, NO = $0.58
-- Total cost = $0.98
-- At expiry: YES = $1.00 and NO = $0.00 (or vice versa)
-- **Result: 2.04% risk-free return**
+| Type d'arbitrage | Description |
+|------------------|-------------|
+| **Kalshi ↔ Polymarket** | Arbitrage cross-plateforme |
+| **Polymarket ↔ Polymarket** | Arbitrage intra-plateforme |
+| **Kalshi ↔ Kalshi** | Arbitrage intra-plateforme |
 
-### Market Insights
+### Points forts
 
-When observing large traders like PN1 finding significant size in these opportunities, the initial assumption was that opportunities would be extremely fleeting with intense competition. However, the reality is quite different:
+- 🔒 **Cache orderbook lock-free** - Opérations atomiques sans copie
+- ⚡ **Détection SIMD** - Latence sub-milliseconde
+- 🔄 **Exécution concurrente** - Ordres simultanés sur les deux plateformes
+- 🛡️ **Circuit breaker** - Gestion des risques configurable
+- 🗺️ **Découverte intelligente** - Mapping automatique des marchés
 
-- **Opportunities are persistent**: While concurrent dislocations aren't frequent, when they do occur, they persist long enough to execute manually
-- **Large traders use limit orders**: Whales typically fill positions via limit orders over extended periods, as odds don't fluctuate significantly before game time
-- **Manual execution is viable**: Opportunities remain available long enough for manual intervention if needed
+---
 
-### System Workflow
+## 🎯 Comment ça marche
 
-The repository implements the following workflow:
+### Principe de l'arbitrage
 
-1. **Market Scanning**: Scans sports markets that expire within the next couple of days
-2. **Market Matching**: Matches Kalshi-Polymarket markets using:
-   - Cached mapping of team names between platforms
-   - Kalshi-Polymarket event slug building conventions
-3. **Real-time Monitoring**: Subscribes to orderbook delta WebSockets to detect instances where YES + NO can be purchased for less than $1.00
-4. **Order Execution**: Executes trades concurrently on both platforms
-5. **Risk Management**: Includes position management and circuit breakers (note: not extensively battle-tested in production)
+Dans les marchés de prédiction : **YES + NO = 1.00$** (garanti).
 
-### Useful Components
+Le bot détecte quand :
+```
+Prix YES (Plateforme A) + Prix NO (Plateforme B) < 1.00$
+```
 
-Beyond the complete arbitrage system, you may find these components particularly useful:
+### Exemple concret
 
-- **Cross-platform market mapping**: The team code mapping system for matching markets across Kalshi and Polymarket
-- **Rust CLOB client**: A Rust rewrite of Polymarket's Python `py-clob-client` (focused on order submission only)
+| Élément | Valeur |
+|---------|--------|
+| YES sur Kalshi | 0.42$ |
+| NO sur Polymarket | 0.56$ |
+| **Coût total** | **0.98$** |
+| **Gain garanti** | **0.02$ (2.04%)** |
 
-## Quick Start
+### Types d'opportunités
 
-### 1. Install Dependencies
+| Type | Stratégie | Fréquence |
+|------|-----------|-----------|
+| `poly_yes_kalshi_no` | Acheter YES Polymarket + NO Kalshi | Commun |
+| `kalshi_yes_poly_no` | Acheter YES Kalshi + NO Polymarket | Commun |
+| `poly_only` | Acheter YES + NO sur Polymarket | Rare |
+| `kalshi_only` | Acheter YES + NO sur Kalshi | Rare |
+
+---
+
+## 🚀 Démarrage rapide
+
+### 1. Prérequis
 
 ```bash
-# Rust 1.75+
+# Installer Rust 1.75+
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
 
-# Build
+### 2. Installation
+
+```bash
+# Cloner le projet
+git clone https://github.com/sind10/Polymarket_Bot.git
+cd Polymarket_Bot
+
+# Compiler
 cargo build --release
 ```
 
-### 2. Set Up Credentials
+### 3. Configuration
 
-Create a `.env` file:
+Créer un fichier `.env` :
 
-```bash
-# === KALSHI CREDENTIALS ===
-KALSHI_API_KEY_ID=your_kalshi_api_key_id
-KALSHI_PRIVATE_KEY_PATH=/path/to/kalshi_private_key.pem
+```env
+# ═══════════════════════════════════════
+# KALSHI
+# ═══════════════════════════════════════
+KALSHI_API_KEY_ID=your_api_key_id
+KALSHI_PRIVATE_KEY_PATH=/path/to/private_key.pem
 
-# === POLYMARKET CREDENTIALS ===
-POLY_PRIVATE_KEY=0xYOUR_WALLET_PRIVATE_KEY
+# ═══════════════════════════════════════
+# POLYMARKET
+# ═══════════════════════════════════════
+POLY_PRIVATE_KEY=0xYOUR_PRIVATE_KEY
 POLY_FUNDER=0xYOUR_WALLET_ADDRESS
 
-# === SYSTEM CONFIGURATION ===
+# ═══════════════════════════════════════
+# SYSTÈME
+# ═══════════════════════════════════════
 DRY_RUN=1
 RUST_LOG=info
 ```
 
-### 3. Run
+### 4. Lancement
 
 ```bash
-# Dry run (paper trading)
+# Mode test (paper trading)
 dotenvx run -- cargo run --release
 
-# Live execution
+# Mode production
 DRY_RUN=0 dotenvx run -- cargo run --release
 ```
 
 ---
 
-## Environment Variables
+## ⚙️ Configuration
 
-### Required
+### Variables requises
 
-| Variable                  | Description                                                 |
-| ------------------------- | ----------------------------------------------------------- |
-| `KALSHI_API_KEY_ID`       | Your Kalshi API key ID                                      |
-| `KALSHI_PRIVATE_KEY_PATH` | Path to RSA private key (PEM format) for Kalshi API signing |
-| `POLY_PRIVATE_KEY`        | Ethereum private key (with 0x prefix) for Polymarket wallet |
-| `POLY_FUNDER`             | Your Polymarket wallet address (with 0x prefix)             |
+| Variable | Description |
+|----------|-------------|
+| `KALSHI_API_KEY_ID` | ID de clé API Kalshi |
+| `KALSHI_PRIVATE_KEY_PATH` | Chemin vers la clé privée RSA (PEM) |
+| `POLY_PRIVATE_KEY` | Clé privée Ethereum (préfixe 0x) |
+| `POLY_FUNDER` | Adresse wallet Polymarket (préfixe 0x) |
 
-### System Configuration
+### Variables système
 
-| Variable          | Default | Description                                           |
-| ----------------- | ------- | ----------------------------------------------------- |
-| `DRY_RUN`         | `1`     | `1` = paper trading (no orders), `0` = live execution |
-| `RUST_LOG`        | `info`  | Log level: `error`, `warn`, `info`, `debug`, `trace`  |
-| `FORCE_DISCOVERY` | `0`     | `1` = re-fetch market mappings (ignore cache)         |
-| `PRICE_LOGGING`   | `0`     | `1` = verbose price update logging                    |
-
-### Test Mode
-
-| Variable        | Default              | Description                                                                                    |
-| --------------- | -------------------- | ---------------------------------------------------------------------------------------------- |
-| `TEST_ARB`      | `0`                  | `1` = inject synthetic arb opportunity for testing                                             |
-| `TEST_ARB_TYPE` | `poly_yes_kalshi_no` | Arb type: `poly_yes_kalshi_no`, `kalshi_yes_poly_no`, `poly_same_market`, `kalshi_same_market` |
+| Variable | Défaut | Description |
+|----------|--------|-------------|
+| `DRY_RUN` | `1` | `1` = simulation, `0` = trading réel |
+| `RUST_LOG` | `info` | Niveau de log (`error`, `warn`, `info`, `debug`, `trace`) |
+| `FORCE_DISCOVERY` | `0` | `1` = reconstruire le cache des marchés |
+| `PRICE_LOGGING` | `0` | `1` = logs détaillés des prix |
 
 ### Circuit Breaker
 
-| Variable                     | Default | Description                                 |
-| ---------------------------- | ------- | ------------------------------------------- |
-| `CB_ENABLED`                 | `true`  | Enable/disable circuit breaker              |
-| `CB_MAX_POSITION_PER_MARKET` | `100`   | Max contracts per market                    |
-| `CB_MAX_TOTAL_POSITION`      | `500`   | Max total contracts across all markets      |
-| `CB_MAX_DAILY_LOSS`          | `5000`  | Max daily loss in cents before halt         |
-| `CB_MAX_CONSECUTIVE_ERRORS`  | `5`     | Consecutive errors before halt              |
-| `CB_COOLDOWN_SECS`           | `60`    | Cooldown period after circuit breaker trips |
+| Variable | Défaut | Description |
+|----------|--------|-------------|
+| `CB_ENABLED` | `true` | Activer/désactiver |
+| `CB_MAX_POSITION_PER_MARKET` | `100` | Max contrats par marché |
+| `CB_MAX_TOTAL_POSITION` | `500` | Max contrats total |
+| `CB_MAX_DAILY_LOSS` | `5000` | Perte max journalière (centimes) |
+| `CB_MAX_CONSECUTIVE_ERRORS` | `5` | Erreurs consécutives avant arrêt |
+| `CB_COOLDOWN_SECS` | `60` | Délai de récupération |
+
+### Mode test
+
+| Variable | Défaut | Description |
+|----------|--------|-------------|
+| `TEST_ARB` | `0` | `1` = injecter une opportunité synthétique |
+| `TEST_ARB_TYPE` | `poly_yes_kalshi_no` | Type d'arbitrage à simuler |
 
 ---
 
-## Obtaining Credentials
+## 📖 Utilisation
 
-### Kalshi
-
-1. Log in to [Kalshi](https://kalshi.com)
-2. Go to **Settings → API Keys**
-3. Create a new API key with trading permissions
-4. Download the private key (PEM file)
-5. Note the API Key ID
-
-### Polymarket
-
-1. Create or import an Ethereum wallet (MetaMask, etc.)
-2. Export the private key (include `0x` prefix)
-3. Fund your wallet on Polygon network with USDC
-4. The wallet address is your `POLY_FUNDER`
-
----
-
-## Usage Examples
-
-### Paper Trading (Development)
+### Exemples de commandes
 
 ```bash
-# Full logging, dry run
+# 🧪 Paper trading avec logs détaillés
 RUST_LOG=debug DRY_RUN=1 dotenvx run -- cargo run --release
-```
 
-### Test Arbitrage Execution
-
-```bash
-# Inject synthetic arb to test execution path
+# 🔬 Tester l'exécution avec opportunité synthétique
 TEST_ARB=1 DRY_RUN=0 dotenvx run -- cargo run --release
-```
 
-### Production
-
-```bash
-# Live trading with circuit breaker
+# 🚀 Production avec circuit breaker personnalisé
 DRY_RUN=0 CB_MAX_DAILY_LOSS=10000 dotenvx run -- cargo run --release
-```
 
-### Force Market Re-Discovery
-
-```bash
-# Clear cache and re-fetch all market mappings
+# 🔄 Forcer la redécouverte des marchés
 FORCE_DISCOVERY=1 dotenvx run -- cargo run --release
 ```
 
 ---
 
-## How It Works
+## 🔑 Obtenir les credentials
 
-### Arbitrage Mechanics
+### Kalshi
 
-In prediction markets, the fundamental property holds: **YES + NO = $1.00** (guaranteed).
+1. Connectez-vous sur [Kalshi](https://kalshi.com)
+2. Allez dans **Settings → API Keys**
+3. Créez une clé avec permissions de trading
+4. Téléchargez la clé privée (fichier PEM)
+5. Notez l'API Key ID
 
-This **Polymarket arbitrage bot** and **Polymarket-Kalshi arbitrage bot** exploits this property by detecting when:
+### Polymarket
 
-```
-Best YES ask (Platform A) + Best NO ask (Platform B) < $1.00
-```
-
-**Example Scenario (Kalshi-Poly Arbitrage):**
-
-```
-Kalshi YES ask:  42¢
-Polymarket NO ask: 56¢
-Total cost:      98¢
-Guaranteed payout: 100¢
-Net profit:       2¢ per contract (2.04% return)
-```
-
-The bot automatically executes both legs simultaneously, locking in the risk-free profit.
-
-### Arbitrage Opportunity Types
-
-This **Kalshi-Poly / Poly-Poly / Kalshi-Kalshi arbitrage bot** supports four types of arbitrage opportunities:
-
-| Type                 | Execution Strategy                          | Frequency | Description |
-| -------------------- | ------------------------------------------- | --------- | ----------- |
-| `poly_yes_kalshi_no` | Buy Polymarket YES + Buy Kalshi NO          | Common    | **Kalshi-Poly**: Cross-platform arbitrage |
-| `kalshi_yes_poly_no` | Buy Kalshi YES + Buy Polymarket NO          | Common    | **Kalshi-Poly**: Cross-platform arbitrage |
-| `poly_only`          | Buy Polymarket YES + Buy Polymarket NO      | Rare      | **Poly-Poly**: Same-platform arbitrage |
-| `kalshi_only`        | Buy Kalshi YES + Buy Kalshi NO              | Rare      | **Kalshi-Kalshi**: Same-platform arbitrage |
-
-### Fee Structure
-
-- **Kalshi**: Trading fees calculated as `ceil(0.07 × contracts × price × (1-price))` - automatically factored into arbitrage detection
-- **Polymarket**: Zero trading fees on all orders
+1. Créez/importez un wallet Ethereum (MetaMask, etc.)
+2. Exportez la clé privée (avec préfixe `0x`)
+3. Approvisionnez en USDC sur le réseau Polygon
+4. L'adresse du wallet = `POLY_FUNDER`
 
 ---
 
-## Architecture
-
-This **Kalshi-Poly / Poly-Poly / Kalshi-Kalshi arbitrage bot** is built with a modular, high-performance architecture optimized for low-latency execution:
+## 🏗️ Architecture
 
 ```
 src/
-├── main.rs              # Application entry point and WebSocket orchestration
-├── types.rs             # Core type definitions and market state management
-├── execution.rs         # Concurrent order execution engine with position reconciliation
-├── position_tracker.rs # Channel-based position tracking and P&L calculation
-├── circuit_breaker.rs   # Risk management with configurable limits and auto-halt
-├── discovery.rs         # Intelligent market discovery and matching system
-├── cache.rs             # Team code mapping cache for cross-platform matching
-├── kalshi.rs            # Kalshi REST API and WebSocket client
-├── polymarket.rs        # Polymarket WebSocket client and market data
-├── polymarket_clob.rs   # Polymarket CLOB order execution client
-└── config.rs            # League configurations and system thresholds
+├── main.rs              # Point d'entrée et orchestration WebSocket
+├── types.rs             # Types et gestion d'état des marchés
+├── execution.rs         # Moteur d'exécution concurrent
+├── position_tracker.rs  # Suivi des positions et P&L
+├── circuit_breaker.rs   # Gestion des risques
+├── discovery.rs         # Découverte et matching des marchés
+├── cache.rs             # Cache de mapping des équipes
+├── kalshi.rs            # Client API Kalshi (REST + WebSocket)
+├── polymarket.rs        # Client WebSocket Polymarket
+├── polymarket_clob.rs   # Client CLOB Polymarket
+└── config.rs            # Configuration des ligues et seuils
 ```
 
-### Key Features
+### Frais
 
-- **Lock-free orderbook cache** using atomic operations for zero-copy updates
-- **SIMD-accelerated arbitrage detection** for sub-millisecond latency
-- **Concurrent order execution** with automatic position reconciliation
-- **Circuit breaker protection** with configurable risk limits
-- **Intelligent market discovery** with caching and incremental updates
+| Plateforme | Frais |
+|------------|-------|
+| **Kalshi** | `ceil(0.07 × contrats × prix × (1-prix))` |
+| **Polymarket** | Gratuit |
 
 ---
 
-## Development
+## 📊 Statut du projet
 
-### Run Tests
+### ✅ Fonctionnalités complètes
+
+- [x] Client API Kalshi (REST + WebSocket)
+- [x] Client API Polymarket (REST + WebSocket)
+- [x] Cache orderbook atomique lock-free
+- [x] Détection d'arbitrage accélérée SIMD
+- [x] Exécution concurrente multi-jambes
+- [x] Suivi des positions et P&L en temps réel
+- [x] Circuit breaker configurable
+- [x] Découverte intelligente avec cache
+- [x] Gestion automatique de l'exposition
+
+### 🚧 Améliorations futures
+
+- [ ] Interface web de configuration des risques
+- [ ] Support multi-comptes
+- [ ] Stratégies de routage avancées
+- [ ] Dashboard d'analytics historiques
+
+---
+
+## 🛠️ Développement
 
 ```bash
+# Lancer les tests
 cargo test
-```
 
-### Enable Profiling
-
-```bash
+# Build avec profiling
 cargo build --release --features profiling
-```
 
-### Benchmarks
-
-```bash
+# Benchmarks
 cargo bench
 ```
 
 ---
 
-## Project Status
+## 🤝 Contribution
 
-### ✅ Completed Features
-
-- [x] Kalshi REST API and WebSocket client
-- [x] Polymarket REST API and WebSocket client
-- [x] Lock-free atomic orderbook cache
-- [x] SIMD-accelerated arbitrage detection
-- [x] Concurrent multi-leg order execution
-- [x] Real-time position and P&L tracking
-- [x] Circuit breaker with configurable risk limits
-- [x] Intelligent market discovery with caching
-- [x] Automatic exposure management for mismatched fills
-
-### 🚧 Future Enhancements
-
-- [ ] Web-based risk limit configuration UI
-- [ ] Multi-account support for portfolio management
-- [ ] Advanced order routing strategies
-- [ ] Historical performance analytics dashboard
+Les contributions sont les bienvenues ! N'hésitez pas à ouvrir une issue ou une pull request.
 
 ---
 
-## Topics & Keywords
+## 📄 Licence
 
-This **Kalshi-Poly / Poly-Poly / Kalshi-Kalshi arbitrage bot** repository covers:
+Ce projet est sous double licence :
 
-- **Kalshi-Poly arbitrage** - Cross-platform arbitrage between Kalshi and Polymarket
-- **Poly-Poly arbitrage** - Same-platform arbitrage on Polymarket markets
-- **Kalshi-Kalshi arbitrage** - Same-platform arbitrage on Kalshi markets
-- **Polymarket arbitrage** - Automated trading on Polymarket prediction markets
-- **Kalshi arbitrage** - Automated trading on Kalshi prediction markets  
-- **Cross-platform arbitrage** - Exploiting price differences between Polymarket and Kalshi
-- **Prediction market trading** - Automated trading bot for prediction markets
-- **Arbitrage trading bot** - High-frequency arbitrage detection and execution
-- **Market making bot** - Risk-free market making via arbitrage
-- **Sports betting arbitrage** - Arbitrage opportunities in sports prediction markets
-- **Rust trading bot** - High-performance trading system written in Rust
-
-### Related Technologies
-
-- Rust async/await for high-performance concurrent execution
-- WebSocket real-time price feeds (Kalshi & Polymarket)
-- REST API integration (Kalshi & Polymarket CLOB)
-- Atomic lock-free data structures for orderbook management
-- SIMD-accelerated arbitrage detection algorithms
+- **Apache License 2.0** - [LICENSE-APACHE](LICENSE-APACHE)
+- **MIT License** - [LICENSE-MIT](LICENSE-MIT)
 
 ---
 
-## Contributing
-
-Contributions are welcome! This **Kalshi-Poly / Poly-Poly / Kalshi-Kalshi arbitrage bot** is open source and designed to help the prediction market trading community.
-
-## License
-
-This project is licensed under either of
-
-- Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
-
-at your option.
-#   P o l y m a r k e t _ B o t  
- 
+<p align="center">
+  <strong>⭐ Star ce repo si vous le trouvez utile !</strong>
+</p>
